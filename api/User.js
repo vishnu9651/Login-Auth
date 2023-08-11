@@ -7,6 +7,10 @@ const User = require("./../models/User");
 //mongodb user verification model
 const UserVerification = require("./../models/UserVerification");
 
+//mongodb user verification model
+const PasswordReset = require("./../models/PasswordReset");
+
+
 //email handler
 const nodemailer = require("nodemailer");
 
@@ -21,7 +25,7 @@ const bcrypt = require("bcrypt");
 
 //path for static verified page
 const path = require("path");
-const { rmSync } = require("fs");
+// const { rmSync } = require("fs");
 
 //nodemailer stuff
 let transporter = nodemailer.createTransport({
@@ -134,6 +138,7 @@ router.post("/signup", (req, res) => {
 const sendVerificationEmail = ({ _id, email }, res) => {
 console.log("verification mail sent")
 //url to be used in the email
+
   const currentUrl = "http://localhost:5000/";
 
   const uniqueString = uuidv4() + _id;
@@ -148,7 +153,8 @@ console.log("verification mail sent")
 
   //hash the uniqueString
   const saltRounds = 10;
-  bcrypt.hash(uniqueString, saltRounds)
+  bcrypt
+  .hash(uniqueString, saltRounds)
     .then((hashedUniqueString) => {
 
       //set values in userVerification collection
@@ -301,6 +307,7 @@ router.post("/signin", (req, res) => {
       .then(data => {
         if (data.length) {
           //user exists
+
           //check if user is verified
 
           if (!data[0].verified) {
@@ -350,5 +357,270 @@ router.post("/signin", (req, res) => {
       })
   }
 });
+
+// //actually reset the password
+
+// router.post("/resetPassword",(req,res)=>{
+//   let {userId,resetString,newPassword}=req.body;
+
+//   PasswordReset.find({userId})
+//   .then(result=>{
+//     if(result.length>0){}
+//     else{}
+
+//   })
+//   .catch(error=>{
+
+//   })
+// })
+
+//password reset stuff
+router.post("/requestPasswordReset",(req,res)=>{
+  const {email,redirectUrl}=req.body;
+
+  //check if email exists
+
+  User.find({email})
+  .then((data)=>{
+    if(data.length){
+      //user exists
+
+      //check if user is verified
+
+      if(!data[0].verified){
+        res.json({
+          status:"FAILED",
+          message:"Email hasn't been verified yet. check your inbox",
+        })
+      }
+      else{
+        //proceed with email to reset password
+        sendResetEmail(data[0],redirectUrl,res);
+      }
+
+    }
+    else{
+      res.json({
+        status:"FAILED",
+        message:"No account with the supplied email exists!"
+      })
+    }
+  })
+  .catch(error=>{
+    console.log(error)
+    res.json({
+      status:"FAILED",
+      message:"An error occurred while checking the existing user"
+    })
+  })
+})
+
+//send password reset email
+
+const sendResetEmail=({_id,email},redirectUrl,res)=>{
+const resetString=uuidv4()+_id;
+
+//first, we clear all exsisting rest reset records 
+
+PasswordReset
+.deleteMany({userId:_id})
+.then(result=>{
+  //Reset records delete successfully
+  //Now we send the email
+
+  //mail options
+const mailOptions = {
+  from: process.env.AUTH_EMAIL,
+  to: email,
+  subject: "Password Reset",
+  html: `<p>now you can reset your password</p><p>This link <b>expires in 1 hours</b>.</p> <p> Press <a href=${
+    redirectUrl +"/" + _id + "/" + resetString}> here</a> to proceed. </p>`,
+};
+//hash the reset string
+
+const saltRounds=10;
+bcrypt
+.hash(resetString,saltRounds)
+.then(hashedResetString=>{
+
+  //set values in password reset collection
+
+  const newPasswordReset=new PasswordReset({
+    userId:_id,
+    resetString:hashedResetString,
+    createdAt:Date.now(),
+    expriesAt:Date.now()+3600000
+
+  })
+  newPasswordReset
+  .save()
+  .then(()=>{
+    transporter
+    .sendMail(mailOptions)
+    .then(()=>{
+      //reset email sent and password reset record saved
+      res.json({
+        status:"PENDING",
+        message:"Password reset email sent"
+      })
+    
+    }).catch(error=>{
+      console.log(error);
+      res.json({
+        status:"FAILED",
+        message:"Password reset email failed",
+      })
+    })
+  })
+  .catch(error=>{
+    console.log(error)
+    res.json({
+      status:"FAILED",
+      message:"Counldn't save password reset data!",
+    })
+  })
+})
+.catch(error=>{
+  console.log(error)
+  res.json({
+    status:"FAILED",
+    message:"An error occurred while hashing the password reset data!"
+  })
+})
+})
+.catch(error=>{
+  //error while clearing exsisting records
+  console.log(error);
+  res.json({
+    status:"FAILED",
+    message:"Clearing exsisting reset records failed"
+  })
+})
+}
+
+
+//Actually reset the password
+router.post("/resetPassword",(req,res)=>{
+
+  let {userId,resetString,newPassword}=req.body;
+
+  PasswordReset.find({userId})
+  .then(result=>{
+    if(result.length>0){
+// password reset record exist so we proceed
+const {expiresAt}=result[0];
+const hashedResetString=result[0].resetString;
+
+//checking for expired reset string
+if(expiresAt<Date.now()){
+  PasswordReset
+  .deleteOne({userId})
+  .then(()=>{
+    //Reset record deleted successfully
+
+    res.json({
+      status:"FAILED",
+      message:"Password reset link has expired"
+    })
+  })
+  .catch(error=>{
+    //deletion failed
+    console.log(error);
+    res.json({
+      status:"FAILED",
+      message:"Clearing password reset record failed."
+    })
+  })
+}else{
+  //valid reset record exists so we validate the reset string
+  //First compare the hashed string
+
+bcrypt
+.compare(resetString,hashedResetString)
+.then((result)=>{
+
+if(result){
+  //strings matched
+  //hash password again
+
+  const saltRounds=10;
+  bcrypt
+  .hash(newPassword,saltRounds)
+  .then(hashedNewPassword=>{
+    //update user password
+
+User.
+updateOne({_id:userId},{password:hashedNewPassword})
+.then(()=>{
+  //update completed. Now delete reset record
+  PasswordReset
+  .deleteOne({userId})
+  .then(()=>{
+//both user record and reset record updated
+
+
+res.json({
+  status:"SUCCESS",
+  message:"Password has been rest successfully."
+})
+  })
+  .catch(error=>{ 
+    console.log(error)
+    res.json({
+      status:"FAILED",
+message:"An error occurred while finalizing password reset"    
+    })
+  })
+})
+.catch(error=>{
+  console.log(error);
+  res.json({
+    status:"FAILED",
+    message:"Updating user password failed."
+  })
+})
+})
+  .catch(error=>{
+    console.log(error);
+    res.json({
+      status:"FAILED",
+      message:"An error occurred while hashing new password.",
+    })
+  })
+}
+else{
+  //Existing record but incorrect reset string passed
+
+  res.json({
+    status:"FAILED",
+    message:"Comparing password reset strings failed"
+  })
+}
+})
+.catch(error=>{
+  res.json({
+    status:"FAILED",
+    message:"Comparing password reset strings failed."
+  })
+})
+}
+    }
+    else{
+      //password reset record doesn't exist
+      res.json({
+        status:"FAILED",
+        message:"Password reset request not found"
+      })
+    }
+  })
+  .catch(error=>{
+    console.log(error)
+    res.json({
+      status:"FAILED",
+      message:"Checking for exixting password reset record failed."
+    })
+  })
+})
+
 
 module.exports = router;
